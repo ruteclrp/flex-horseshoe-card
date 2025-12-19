@@ -648,7 +648,7 @@ import {
   
         .card--dropshadow-down-and-distant {
           filter: drop-shadow(0px 0.05em 0px #b2a98f)
-                  drop-shadow(0px 14px 10px rgba(0,0,0,0.15)
+                  drop-shadow(0px 14px 10px rgba(0,0,0,0.15))
                   drop-shadow(0px 24px 2px rgba(0,0,0,0.1))
                   drop-shadow(0px 34px 30px rgba(0,0,0,0.1));
         }
@@ -695,6 +695,14 @@ import {
   
   set hass(hass) { // This is a safe and fast method  // Set ref to hass, use "_"for the name ;-)
       this._hass = hass;
+
+      if (!this.config || !Array.isArray(this.config.entities) || this.config.entities.length === 0) {
+        return;
+      }
+
+      if (!hass || !hass.states) {
+        return;
+      }
     
       var entityHasChanged = false;
       
@@ -702,15 +710,24 @@ import {
       // Only if changed, continue and force render
       var value;
       var index = 0;
-      var attrSet = false;
       var newStateStr;
       for (value of this.config.entities) {
-        this.entities[index] = hass.states[this.config.entities[index].entity];
+        const entityDef = this.config.entities[index];
+        const entityId = entityDef && entityDef.entity;
+        this.entities[index] = entityId ? hass.states[entityId] : undefined;
+
+        // If entity isn't available yet (startup, typo, removed entity), skip safely.
+        if (!this.entities[index]) {
+          index++;
+          continue;
+        }
+
+        var attrSet = false;
   
         // Get attribute state if specified and available
-        if (this.config.entities[index].attribute) {
-          if (this.entities[index].attributes[this.config.entities[index].attribute]) {
-            newStateStr = this._buildState(this.entities[index].attributes[this.config.entities[index].attribute], this.config.entities[index]);
+        if (entityDef.attribute) {
+          if (this.entities[index].attributes && this.entities[index].attributes[entityDef.attribute] !== undefined) {
+            newStateStr = this._buildState(this.entities[index].attributes[entityDef.attribute], entityDef);
             if (newStateStr != this.attributesStr[index]) {
               this.attributesStr[index] = newStateStr;
               entityHasChanged = true;
@@ -719,7 +736,7 @@ import {
           }
         }
         if (!attrSet) {
-          newStateStr = this._buildState(this.entities[index].state, this.config.entities[index]);
+          newStateStr = this._buildState(this.entities[index].state, entityDef);
           if (newStateStr != this.entitiesStr[index]) {
             this.entitiesStr[index] = newStateStr;
             entityHasChanged = true;
@@ -738,9 +755,13 @@ import {
       // Use first state or attribute for displaying the horseshoe
       
       // #TODO: only if state or attribute has changed.
+      if (!this.entities[0]) {
+        return;
+      }
+
       var state = this.entities[0].state;
       if ((this.config.entities[0].attribute)) {
-        if (this.entities[0].attributes[this.config.entities[0].attribute]) {
+        if (this.entities[0].attributes && this.entities[0].attributes[this.config.entities[0].attribute] !== undefined) {
           state = this.entities[0].attributes[this.config.entities[0].attribute];
         }
       }
@@ -749,8 +770,8 @@ import {
       // value. It will fill the horseshoe relative to the state and min/max
       // values given in the configuration.
       
-    const min = this.config.horseshoe_scale.min || 0;
-    const max = this.config.horseshoe_scale.max || 100;
+    const min = this.config.horseshoe_scale.min ?? 0;
+    const max = this.config.horseshoe_scale.max ?? 100;
     const val = Math.min(this._calculateValueBetween(min, max, state), 1);
     const score = val * HORSESHOE_PATH_LENGTH;
     const total = 10 * HORSESHOE_RADIUS_SIZE;
@@ -867,30 +888,55 @@ import {
   
     setConfig(config) {
       config = JSON.parse(JSON.stringify(config));
-      
-    if (!config.entities) {
-    throw Error('No entities defined');
+
+    if (!config || typeof config !== 'object') {
+      throw Error('Invalid configuration');
     }
+
+    if (!Array.isArray(config.entities) || config.entities.length === 0) {
+      throw Error('No entities defined');
+    }
+
     if (!config.layout) {
-    throw Error('No layout defined');
+      throw Error('No layout defined');
     }
+
     if (!config.horseshoe_scale) {
-    throw Error('No horseshoe scale defined');
+      throw Error('No horseshoe scale defined');
     } else {
-        if ((!config.horseshoe_scale.min) && (!config.horseshoe_scale.min == 0) || (!config.horseshoe_scale.max)) {
-          throw Error('No horseshoe min/max for scale defined');
-        }
+      const hasMin = config.horseshoe_scale.min !== undefined && config.horseshoe_scale.min !== null;
+      const hasMax = config.horseshoe_scale.max !== undefined && config.horseshoe_scale.max !== null;
+      if (!hasMin || !hasMax) {
+        throw Error('No horseshoe min/max for scale defined');
       }
-    if ((!config.color_stops) || (config.color_stops.length < 2)) {
-    throw Error('No color_stops defined or not at least two colorstops');
+    }
+
+    const colorStopsCount = (() => {
+      if (!config.color_stops || typeof config.color_stops !== 'object') return 0;
+      if (Array.isArray(config.color_stops)) return config.color_stops.length;
+      return Object.keys(config.color_stops).length;
+    })();
+
+    if (colorStopsCount < 2) {
+      throw Error('No color_stops defined or not at least two colorstops');
     }
   
     // testing
-    if (config.entities) {
-    const newdomain = this._computeDomain(config.entities[0].entity);
+    const normalizedEntities = config.entities.map((entityValue) => {
+      if (typeof entityValue === 'string') return { entity: entityValue };
+      return entityValue;
+    });
+
+    const firstEntityId = normalizedEntities[0] && normalizedEntities[0].entity;
+    if (!firstEntityId) {
+      throw Error('First entity must be defined');
+    }
+
+    if (normalizedEntities) {
+    const newdomain = this._computeDomain(firstEntityId);
     if (newdomain != 'sensor') {
       // If not a sensor, check if attribute is a number. If so, continue, otherwise Error...
-      if (config.entities[0].attribute && !isNaN(config.entities[0].attribute)) {
+      if (normalizedEntities[0].attribute && !isNaN(normalizedEntities[0].attribute)) {
       throw Error('First entity or attribute must be a numbered sensorvalue, but is NOT');
       }
     }        
@@ -900,6 +946,7 @@ import {
     texts: [],
         card_filter: 'card--filter-none',
         ...config,
+        entities: normalizedEntities,
         show: { ...DEFAULT_SHOW, ...config.show },
         horseshoe_scale: { ...DEFAULT_HORSESHOE_SCALE, ...config.horseshoe_scale },
         horseshoe_state: { ...DEFAULT_HORSESHOE_STATE, ...config.horseshoe_state },
@@ -1155,6 +1202,8 @@ import {
   
       const svgItems = layout.names.map(item => {
   
+        if (!this.entities || !this.entities[item.entity_index]) return svg``;
+
         // compute some styling elements if configured for this name item
     const ENTITY_NAME_STYLES = {
       "font-size": '1.5em;',
@@ -1208,6 +1257,8 @@ import {
       if (!layout.areas) return;
       
       const svgItems = layout.areas.map(item => {
+    if (!this.entities || !this.entities[item.entity_index]) return svg``;
+
     const AREA_STYLES = {
       "font-size": '1em;',
       "color": 'var(--primary-text-color);',
@@ -1253,6 +1304,7 @@ import {
     _renderState(item) {
   
     if (!item) return;
+    if (!this.entities || !this.entities[item.entity_index]) return;
     
     // compute x,y or dx,dy positions. Spec none if not specified.
     const x = item.xpos ? item.xpos : '';
@@ -1317,6 +1369,7 @@ import {
   const uom = this._buildUom(this.entities[item.entity_index], this.config.entities[item.entity_index]);
   
   const state = (this.config.entities[item.entity_index].attribute &&
+                  this.entities[item.entity_index].attributes &&
                   this.entities[item.entity_index].attributes[this.config.entities[item.entity_index].attribute])
                   ? this.attributesStr[item.entity_index]
                   : this.entitiesStr[item.entity_index];
@@ -1384,6 +1437,7 @@ import {
     _renderIcon(item) {
   
     if (!item) return;
+    if (!this.entities || !this.entities[item.entity_index]) return;
   
   item.entity = item.entity ? item.entity : 0;
   
@@ -1709,6 +1763,9 @@ import {
     */
   
   _buildName(entityState, entityConfig) {
+    if (!entityState || !entityState.attributes) {
+      return entityConfig && entityConfig.name ? entityConfig.name : '?';
+    }
     return (
     entityConfig.name
     || entityState.attributes.friendly_name
@@ -1723,6 +1780,9 @@ import {
     *
     */
   _buildIcon(entityState, entityConfig) {
+    if (!entityState || !entityState.attributes) {
+      return entityConfig && entityConfig.icon ? entityConfig.icon : 'mdi:help-circle';
+    }
     return (
     entityConfig.icon
     || entityState.attributes.icon
@@ -1738,6 +1798,9 @@ import {
     */
   
   _buildUom(entityState, entityConfig) {
+    if (!entityState || !entityState.attributes) {
+      return entityConfig && entityConfig.unit ? entityConfig.unit : '';
+    }
     return (
     entityConfig.unit
     || entityState.attributes.unit_of_measurement
@@ -1973,5 +2036,7 @@ import {
   }
   }
   
-  customElements.define('flex-horseshoe-card', FlexHorseshoeCard);
+  if (!customElements.get('flex-horseshoe-card')) {
+    customElements.define('flex-horseshoe-card', FlexHorseshoeCard);
+  }
   
